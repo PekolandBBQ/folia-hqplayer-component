@@ -1,0 +1,44 @@
+name: Build HQPlayer component
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - shell: pwsh
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag/version mismatch' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hqplayer-component
+          path: artifacts/*.zip
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: hqplayer-component
+          path: artifacts
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" artifacts/*.zip --title "$TAG" --notes "Independent optional HQPlayer control component" --latest=false

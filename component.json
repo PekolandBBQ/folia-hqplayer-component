@@ -1,0 +1,16 @@
+{
+  "id": "hqplayer",
+  "version": "0.1.2",
+  "protocolMajor": 1,
+  "platform": "win32-x64",
+  "entry": "hqplayer-component.cjs",
+  "capabilities": [
+    "local-file",
+    "playback-control",
+    "dsp-settings",
+    "single-instance",
+    "launch-options",
+    "shutdown-all",
+    "dsp-defaults"
+  ]
+}
