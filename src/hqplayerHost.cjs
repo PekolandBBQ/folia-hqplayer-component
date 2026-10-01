@@ -78,23 +78,28 @@ async function waitForPlaylistItem(client, timeoutMs = PLAYLIST_TIMEOUT_MS) {
 }
 
 // Retry only explicit cold-connection rejections; a timed-out add may already have executed.
-async function addPreparedPlaylist(client, filePath, coldConnection, delay = ms => new Promise(resolve => setTimeout(resolve, ms))) {
-    const attempts = coldConnection ? 3 : 1;
+async function addPreparedPlaylist(client, filePath, coldConnection, delay = ms => new Promise(resolve => setTimeout(resolve, ms)), onAttempt = () => {}) {
+    // The control socket can accept commands before Desktop's media reader is ready.
+    // No delay on success, at most 5.75 seconds of backoff, and never replay an ambiguous timeout.
+    const backoff = coldConnection ? [250, 500, 1000, 1500, 2500] : [];
+    const attempts = backoff.length + 1;
     for (let attempt = 0; attempt < attempts; attempt++) {
         try {
             await client.request('PlaylistAdd', { uri: filePath, queued: 0, clear: 1, start: 0, freewheel: 1 });
+            onAttempt({ attempt: attempt + 1, attempts, coldConnection, result: 'accepted' });
             return;
         } catch (error) {
+            onAttempt({ attempt: attempt + 1, attempts, coldConnection, result: 'rejected', code: error?.code });
             if (error?.code !== 'HQPLAYER_COMMAND_REJECTED' || error.command !== 'PlaylistAdd'
                 || error.result !== 'Error' || attempt === attempts - 1) throw error;
-            await delay(500 * (attempt + 1));
+            await delay(backoff[attempt]);
         }
     }
 }
 
 function createHQPlayerHost({ protocolFactory = options => new HQPlayerProtocol(options), discover = findHQPlayerExecutable,
     launch = startMinimized, probe = canConnect, wait = waitForServer, kill = pid => process.kill(pid),
-    onState = () => {}, onError = () => {}, onOwnedProcess = () => {}, configPath, findRunning = findRunningHQPlayers,
+    onState = () => {}, onError = () => {}, onOwnedProcess = () => {}, onDiagnostic = () => {}, configPath, findRunning = findRunningHQPlayers,
     closeAll = require('./hqplayerInstance.cjs').closeAllHQPlayers } = {}) {
     const dsp = createDspController();
     let configuring = false, silentLaunch = false, approvedPid = null;
@@ -192,8 +197,9 @@ function createHQPlayerHost({ protocolFactory = options => new HQPlayerProtocol(
             active = null; pendingSeek = null; awaitingPlayingUntil = 0;
             await client.request('Stop').catch(() => {});
             await dsp.beforeTrack(client, trackKey, defaults);
-            const retryColdConnection = coldConnection; coldConnection = false;
-            await addPreparedPlaylist(client, filePath, retryColdConnection);
+            await addPreparedPlaylist(client, filePath, coldConnection, undefined, detail => onDiagnostic({ event: 'playlist-load', ...detail }));
+            // A rejected first load must not consume cold-start recovery for a user retry.
+            coldConnection = false;
             const playlist = await waitForPlaylistItem(client);
             const hqplayerGainDb = clampGainDb(gainDb);
             expectedVolumeDb = hqplayerGainDb; volumeWriteUntil = Date.now() + 500;

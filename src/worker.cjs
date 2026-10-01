@@ -18,7 +18,8 @@ async function handle(message) {
             host = createHQPlayerHost({ configPath: message.configPath,
                 onState: state => send({ event: 'state', state }),
                 onError: error => { diagnostic(error); send({ event: 'error', errorCode: errorCode(error) }); },
-                onOwnedProcess: pid => send({ event: 'owned-process', pid }) });
+                onOwnedProcess: pid => send({ event: 'owned-process', pid }),
+                onDiagnostic: detail => send({ event: 'diagnostic', detail }) });
             host.setSilent(message.silent === true); result = { ok: true };
         } else if (message.action === 'dispose') { host?.dispose(); result = { ok: true }; }
         else {

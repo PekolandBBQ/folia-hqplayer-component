@@ -134,19 +134,33 @@ describe('HQPlayer cold connection preparation', () => {
     it('waits then retries an explicit first-load rejection with playback disabled', async () => {
         let adds = 0;
         const client = { request: vi.fn(async (name: string) => {
-            if (name === 'PlaylistAdd' && ++adds < 3) throw rejected();
+            if (name === 'PlaylistAdd' && ++adds < 4) throw rejected();
         }) };
         const delay = vi.fn(async () => {});
-        await addPreparedPlaylist(client, 'source.flac', true, delay);
-        expect(adds).toBe(3);
-        expect(delay.mock.calls).toEqual([[500], [1000]]);
-        expect(client.request.mock.calls.map(call => call[0])).toEqual(['PlaylistAdd', 'PlaylistAdd', 'PlaylistAdd']);
+        const diagnostic = vi.fn();
+        await addPreparedPlaylist(client, 'source.flac', true, delay, diagnostic);
+        expect(adds).toBe(4);
+        expect(delay.mock.calls).toEqual([[250], [500], [1000]]);
+        expect(diagnostic).toHaveBeenLastCalledWith({ attempt: 4, attempts: 6, coldConnection: true, result: 'accepted' });
         expect(client.request).toHaveBeenCalledWith('PlaylistAdd', expect.objectContaining({ clear: 1, start: 0 }));
     });
-    it('stops after three explicit rejections', async () => {
+    it('stops after six explicit rejections and bounded total backoff', async () => {
         const error = rejected(); const client = { request: vi.fn(async (name: string) => { if (name === 'PlaylistAdd') throw error; }) };
-        await expect(addPreparedPlaylist(client, 'source.flac', true, async () => {})).rejects.toBe(error);
-        expect(client.request.mock.calls.filter(call => call[0] === 'PlaylistAdd')).toHaveLength(3);
+        const delay = vi.fn(async () => {});
+        await expect(addPreparedPlaylist(client, 'source.flac', true, delay)).rejects.toBe(error);
+        expect(client.request.mock.calls.filter(call => call[0] === 'PlaylistAdd')).toHaveLength(6);
+        expect(delay.mock.calls.reduce((total, call) => total + Number(call[0]), 0)).toBe(5750);
+    });
+    it('adds no wait to a ready cold reader', async () => {
+        const client = { request: vi.fn().mockResolvedValue(undefined) }, delay = vi.fn();
+        await addPreparedPlaylist(client, 'source.flac', true, delay);
+        expect(client.request).toHaveBeenCalledTimes(1); expect(delay).not.toHaveBeenCalled();
+    });
+    it('does not repeat permission or authentication rejections', async () => {
+        const error = { ...rejected(), result: 'NotAuthenticated' };
+        const client = { request: vi.fn().mockRejectedValue(error) }, delay = vi.fn();
+        await expect(addPreparedPlaylist(client, 'source.flac', true, delay)).rejects.toBe(error);
+        expect(client.request).toHaveBeenCalledTimes(1); expect(delay).not.toHaveBeenCalled();
     });
     it.each([false, true])('does not retry ambiguous failures (cold=%s)', async cold => {
         const error = new Error('HQPlayer PlaylistAdd response timed out');
@@ -158,5 +172,27 @@ describe('HQPlayer cold connection preparation', () => {
         const client = { request: vi.fn().mockRejectedValue(rejected()) };
         await expect(addPreparedPlaylist(client, 'source.flac', false, async () => {})).rejects.toThrow('PlaylistAdd');
         expect(client.request).toHaveBeenCalledTimes(1);
+    });
+    it('retains cold recovery after an exhausted first load', async () => {
+        vi.useFakeTimers();
+        let rejectLoad = true;
+        const diagnostic = vi.fn();
+        const protocol = Object.assign(new EventEmitter(), { connect: vi.fn(async () => {}), close: vi.fn(),
+            isConnected: () => true, send: vi.fn(), request: vi.fn(async (name: string) => {
+                if (name === 'PlaylistAdd' && rejectLoad) throw rejected();
+                return parseDocument(name === 'PlaylistGet'
+                    ? '<PlaylistGet><PlaylistItem length="30" rate="48000" channels="2" bits="24"/></PlaylistGet>'
+                    : `<${name} result="OK"/>`);
+            }) });
+        const host = createHQPlayerHost({ protocolFactory: () => protocol, probe: async () => true,
+            findRunning: async () => [], onDiagnostic: diagnostic });
+        try {
+            const failed = host.load({ session: 'first', filePath: 'source.flac' }).catch((error: Error) => error);
+            await vi.advanceTimersByTimeAsync(6000);
+            expect(await failed).toMatchObject({ code: 'HQPLAYER_COMMAND_REJECTED' });
+            rejectLoad = false;
+            await host.load({ session: 'retry', filePath: 'source.flac' });
+            expect(diagnostic).toHaveBeenLastCalledWith(expect.objectContaining({ coldConnection: true, result: 'accepted' }));
+        } finally { host.dispose(); vi.useRealTimers(); }
     });
 });
